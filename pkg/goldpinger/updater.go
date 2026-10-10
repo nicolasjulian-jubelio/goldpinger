@@ -134,15 +134,8 @@ func destroyPingers(pingers map[string]*Pinger, deletedPods map[string]*Goldping
 		)
 		pinger := pingers[podName]
 
-		// Close the channel to stop pinging
-		close(pinger.stopChan)
-
-		// Clean up stale metric labels for this peer so defunct pod IPs
-		// don't linger in /metrics after rolling updates (see #167)
-		DeletePeerMetrics(pod.HostIP, pod.PodIP)
-		if GoldpingerConfig.UDPEnabled {
-			DeletePeerUDPMetrics(pod.HostIP, pod.PodIP)
-		}
+		// Stop pinging and remove the peer's metric label sets
+		pinger.Stop()
 
 		// delete from pingers
 		delete(pingers, podName)

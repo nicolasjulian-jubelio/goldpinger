@@ -213,6 +213,29 @@ func TestProbeUDP_ZeroCount(t *testing.T) {
 	}
 }
 
+// TestProbeUDP_DialErrorIsReturnedNotRecorded verifies that ProbeUDP reports
+// errors in its result and leaves recording them to the caller, which skips
+// peers that were removed while the probe ran.
+func TestProbeUDP_DialErrorIsReturnedNotRecorded(t *testing.T) {
+	origHostname := GoldpingerConfig.Hostname
+	GoldpingerConfig.Hostname = "test-instance"
+	defer func() { GoldpingerConfig.Hostname = origHostname }()
+
+	result := ProbeUDP("127.0.0.1", -1, 5, 64, 200*time.Millisecond)
+	if result.Err == nil {
+		t.Fatal("expected a dial error for port -1, got nil")
+	}
+	if result.Errors != 1 {
+		t.Errorf("Errors = %d, want 1", result.Errors)
+	}
+	if result.LossPct != 100 {
+		t.Errorf("LossPct = %v, want 100", result.LossPct)
+	}
+	if n := countMetrics(goldpingerUDPErrorsCounter); n != 0 {
+		t.Errorf("goldpinger_udp_errors_total has %d label set(s), want 0: ProbeUDP must not record errors itself", n)
+	}
+}
+
 func TestProbeUDP_PacketFormat(t *testing.T) {
 	pkt := make([]byte, 64)
 	binary.BigEndian.PutUint32(pkt[0:4], udpMagic)

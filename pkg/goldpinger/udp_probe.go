@@ -45,7 +45,10 @@ type UDPProbeResult struct {
 	AvgRttS    float64
 	Duplicates int
 	OutOfOrder int
-	Err        error
+	// Errors counts dial and send errors. The caller records them, so that
+	// nothing is written for a peer that was removed while the probe ran.
+	Errors int
+	Err    error
 }
 
 // StartUDPListener starts a UDP echo listener on the given port.
@@ -141,8 +144,7 @@ func ProbeUDP(targetIP string, port, count, size int, timeout time.Duration) UDP
 	addr := net.JoinHostPort(targetIP, strconv.Itoa(port))
 	conn, err := net.Dial("udp", addr)
 	if err != nil {
-		CountUDPError(targetIP)
-		return UDPProbeResult{LossPct: 100, Err: fmt.Errorf("dial: %w", err)}
+		return UDPProbeResult{LossPct: 100, Errors: 1, Err: fmt.Errorf("dial: %w", err)}
 	}
 	defer conn.Close()
 
@@ -166,12 +168,13 @@ func ProbeUDP(targetIP string, port, count, size int, timeout time.Duration) UDP
 	binary.BigEndian.PutUint32(pkt[0:4], udpMagic)
 
 	// Send all packets
+	sendErrors := 0
 	for i := 0; i < count; i++ {
 		binary.BigEndian.PutUint32(pkt[4:8], uint32(i))
 		binary.BigEndian.PutUint64(pkt[8:16], uint64(time.Now().UnixNano()))
 		_, err := conn.Write(pkt)
 		if err != nil {
-			CountUDPError(targetIP)
+			sendErrors++
 			zap.L().Debug("UDP send error", zap.Int("seq", i), zap.Error(err))
 		}
 	}
@@ -237,6 +240,7 @@ func ProbeUDP(targetIP string, port, count, size int, timeout time.Duration) UDP
 		AvgRttS:    avgRttS,
 		Duplicates: state.duplicates,
 		OutOfOrder: state.outOfOrder,
+		Errors:     sendErrors,
 	}
 }
 

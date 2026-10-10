@@ -40,6 +40,12 @@ type Pinger struct {
 	resultsChan chan<- PingAllPodsResult
 	stopChan    chan struct{}
 	logger      *zap.Logger
+
+	// metricsMux serializes the per-peer metric writes of an in-flight Ping
+	// with the cleanup in Stop, so a probe that finishes after the peer was
+	// removed cannot recreate the label sets Stop deleted.
+	metricsMux sync.Mutex
+	stopped    bool
 }
 
 // NewPinger constructs and returns a Pinger object responsible for pinging a single
@@ -160,17 +166,7 @@ func (p *Pinger) Ping() {
 				zap.Float64("udpRttMs", udpRttMs),
 			)
 		}
-		SetPeerLossPct(p.pod.HostIP, p.pod.PodIP, lossPct)
-		SetPeerHopCount(p.pod.HostIP, p.pod.PodIP, hopCount)
-		if udpResult.AvgRttS > 0 {
-			ObservePeerUDPRtt(p.pod.HostIP, p.pod.PodIP, udpResult.AvgRttS)
-		}
-		if udpResult.Duplicates > 0 {
-			CountUDPDuplicates(p.pod.HostIP, p.pod.PodIP, udpResult.Duplicates)
-		}
-		if udpResult.OutOfOrder > 0 {
-			CountUDPOutOfOrder(p.pod.HostIP, p.pod.PodIP, udpResult.OutOfOrder)
-		}
+		p.recordUDPResult(udpResult)
 	}
 
 	if OK {
@@ -208,6 +204,53 @@ func (p *Pinger) Ping() {
 		}
 		p.logger.Warn("Ping returned error", zap.Duration("responseTime", responseTime), zap.Error(err))
 		CountError("ping")
+	}
+}
+
+// recordUDPResult records the per-peer UDP metrics for one probe. It records
+// nothing once the pinger has been stopped: the probe may have been in flight
+// against a peer that no longer exists, and writing would recreate the label
+// sets Stop deleted, leaving them in /metrics with no pinger to update or
+// remove them. Returns whether the metrics were recorded.
+func (p *Pinger) recordUDPResult(r UDPProbeResult) bool {
+	p.metricsMux.Lock()
+	defer p.metricsMux.Unlock()
+	if p.stopped {
+		return false
+	}
+
+	SetPeerLossPct(p.pod.HostIP, p.pod.PodIP, r.LossPct)
+	SetPeerHopCount(p.pod.HostIP, p.pod.PodIP, r.HopCount)
+	if r.AvgRttS > 0 {
+		ObservePeerUDPRtt(p.pod.HostIP, p.pod.PodIP, r.AvgRttS)
+	}
+	if r.Duplicates > 0 {
+		CountUDPDuplicates(p.pod.HostIP, p.pod.PodIP, r.Duplicates)
+	}
+	if r.OutOfOrder > 0 {
+		CountUDPOutOfOrder(p.pod.HostIP, p.pod.PodIP, r.OutOfOrder)
+	}
+	for i := 0; i < r.Errors; i++ {
+		CountUDPError(pickPodHostIP(p.pod.PodIP, p.pod.HostIP))
+	}
+	return true
+}
+
+// Stop stops the continuous pinging and removes the peer's metric label sets.
+// A Ping already in flight runs to completion but no longer records per-peer
+// metrics, so the deleted label sets stay deleted.
+func (p *Pinger) Stop() {
+	close(p.stopChan)
+
+	p.metricsMux.Lock()
+	defer p.metricsMux.Unlock()
+	p.stopped = true
+
+	// Clean up stale metric labels for this peer so defunct pod IPs
+	// don't linger in /metrics after rolling updates (see #167)
+	DeletePeerMetrics(p.pod.HostIP, p.pod.PodIP)
+	if GoldpingerConfig.UDPEnabled {
+		DeletePeerUDPMetrics(p.pod.HostIP, p.pod.PodIP)
 	}
 }
 
